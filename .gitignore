@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.py[cod]
+data/embeddings/*
+!data/embeddings/.gitkeep
+data/knowledge_base/*
+!data/knowledge_base/.gitkeep
+data/logs/*.log
+!data/logs/.gitkeep
+.DS_Store

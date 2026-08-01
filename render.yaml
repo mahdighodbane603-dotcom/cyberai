@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: cyberai
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: CYBERAI_API_TOKEN
+        generateValue: true
+      - key: GROQ_API_KEY
+        sync: false
+      - key: LLM_PROVIDER
+        value: groq
+      - key: LLM_MODEL
+        value: llama3-70b-8192
