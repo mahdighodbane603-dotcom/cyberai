@@ -9,6 +9,10 @@ from models.schemas import ChatRequest, ChatResponse, AgentStatus
 from agent_system import agent
 from rag_pipeline import rag
 from tools.multimodal_processor import multimodal
+from models.conversation_store import ConversationStore
+from models.llm_backend import llm
+
+store = ConversationStore()
 
 logging.basicConfig(level=CONFIG.log_level)
 logger = logging.getLogger("cyberai")
@@ -32,13 +36,44 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 async def status():
     return AgentStatus(status="operational", collections_count=len(rag.collections), uptime_seconds=time.time())
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest, auth=Depends(verify_token)):
-    start = time.time()
-    result = await agent.process(question=req.question, session_id=req.session_id, user_id=req.user_id)
-    return ChatResponse(session_id=result["session_id"], response=result["response"],
-        risk_level=result["risk_level"], docs_retrieved=result["docs_retrieved"],
-        tools_called=result["tools_called"], processing_time_ms=round((time.time()-start)*1000,2))
+@app.post("/chat")
+async def chat(req: ChatRequest):
+    # Conversation existante ? sinon on en crée une
+    cid = req.conversation_id
+    if not cid or not store.get(cid):
+        cid = store.creer()
+
+    # Sauvegarde du message utilisateur
+    store.ajouter_message(cid, "user", req.message)
+
+    # Mémoire de CETTE conversation (8 derniers messages)
+    historique = store.historique_llm(cid, max_messages=8)
+    reponse = llm.generate(req.message, req.contexte, historique=historique)
+
+    # Sauvegarde de la réponse
+    store.ajouter_message(cid, "assistant", reponse)
+    return {"reponse": reponse, "conversation_id": cid}
+
+@app.get("/api/conversations")
+def liste_conversations():
+    return store.lister()
+
+@app.post("/api/conversations")
+def nouvelle_conversation():
+    return {"id": store.creer()}
+
+@app.get("/api/conversations/{cid}")
+def get_conversation(cid: str):
+    conv = store.get(cid)
+    if not conv:
+        raise HTTPException(404, "Conversation introuvable")
+    return conv
+
+@app.delete("/api/conversations/{cid}")
+def delete_conversation(cid: str):
+    if not store.supprimer(cid):
+        raise HTTPException(404, "Conversation introuvable")
+    return {"ok": True}
 
 @app.post("/analyze_image")
 async def analyze_image(file: UploadFile = File(...), prompt: str = Form("Analyse cette image en cybersécurité"), auth=Depends(verify_token)):
@@ -71,46 +106,223 @@ async def chat_audio(audio: UploadFile = File(...), auth=Depends(verify_token)):
 
 @app.get("/demo", response_class=HTMLResponse)
 async def demo():
-    return HTMLResponse(f"""<!DOCTYPE html>
-<html lang="fr"><head><meta charset="UTF-8"><title>CyberAI</title>
+    return HTMLResponse(r"""<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CyberAI — Console</title>
 <style>
-*{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:Segoe UI,sans-serif;background:#0a0e27;color:#e0e0e0;padding:20px}}
-.container{{max-width:700px;margin:auto}}
-h1{{color:#00ff88;text-align:center}} .card{{background:#1a1f3a;border-radius:12px;padding:20px;margin:20px 0;border:1px solid #2a2f5a}}
-textarea,input[type=file]{{width:100%;padding:10px;border-radius:8px;border:1px solid #3a3f6a;background:#0d1230;color:#e0e0e0;margin:10px 0}}
-button{{background:#00ff88;color:#0a0e27;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-weight:bold;margin:5px}}
-.result{{background:#0d1230;border-radius:8px;padding:15px;margin-top:15px;border-left:4px solid #00ff88;white-space:pre-wrap}}
-.hidden{{display:none}} .recording{{animation:pulse 1s infinite;background:#ff4444!important}}
-@keyframes pulse{{0%,100%{{transform:scale(1)}}50%{{transform:scale(1.05)}}}}
-</style></head><body>
-<div class=container><h1>🛡️ CyberAI</h1><p style=color:#888;text-align:center>Assistant Cybersécurité</p>
-<div class=card><h2>💬 Chat</h2><textarea id=chatInput rows=3 placeholder="Pose ta question..."></textarea>
-<button onclick=sendChat()>Envoyer</button><div id=chatResult class="result hidden"></div></div>
-<div class=card><h2>🖼️ Image</h2><input type=file id=imageInput accept=image/*>
-<button onclick=sendImage()>Analyser</button><div id=imageResult class="result hidden"></div></div>
-<div class=card><h2>🎤 Audio</h2><button id=recordBtn class=recording onclick=toggleRecording()>🎤 Enregistrer</button>
-<div id=audioResult class="result hidden"></div><audio id=audioPlayer class=hidden controls style=width:100%></audio></div></div>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:'Segoe UI',system-ui,sans-serif; background:#0f1117; color:#e6e9ef; height:100vh; display:flex; }
+  /* Sidebar */
+  #sidebar { width:280px; background:#161922; border-right:1px solid #232836; display:flex; flex-direction:column; }
+  #sidebar header { padding:16px; border-bottom:1px solid #232836; }
+  #sidebar h1 { font-size:18px; color:#6ee7b7; }
+  #btnNouveau { width:100%; margin-top:12px; padding:10px; background:#10b981; color:#04231a; border:none; border-radius:8px; font-weight:700; cursor:pointer; font-size:14px; }
+  #btnNouveau:hover { background:#34d399; }
+  #liste { flex:1; overflow-y:auto; padding:8px; }
+  .conv { padding:10px 12px; border-radius:8px; cursor:pointer; margin-bottom:4px; position:relative; display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .conv:hover { background:#1e2430; }
+  .conv.active { background:#10b98122; border:1px solid #10b98166; }
+  .conv .titre { font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
+  .conv .meta { font-size:11px; color:#8a93a6; }
+  .conv .del { visibility:hidden; background:none; border:none; color:#f87171; cursor:pointer; font-size:14px; }
+  .conv:hover .del { visibility:visible; }
+  .vide { color:#5b6472; font-size:13px; text-align:center; padding:20px; }
+  /* Zone chat */
+  #main { flex:1; display:flex; flex-direction:column; }
+  #header { padding:14px 20px; border-bottom:1px solid #232836; font-size:15px; color:#aab3c5; }
+  #header b { color:#e6e9ef; }
+  #messages { flex:1; overflow-y:auto; padding:20px; display:flex; flex-direction:column; gap:12px; }
+  .msg { max-width:75%; padding:12px 14px; border-radius:12px; font-size:14px; line-height:1.55; white-space:pre-wrap; word-wrap:break-word; }
+  .msg.user { align-self:flex-end; background:#10b981; color:#04231a; border-bottom-right-radius:4px; }
+  .msg.assistant { align-self:flex-start; background:#1e2430; border:1px solid #2a3140; border-bottom-left-radius:4px; }
+  .msg.assistant code, .msg.user code { background:#0d1117; padding:2px 6px; border-radius:4px; font-family:Consolas,monospace; font-size:13px; }
+  .msg.assistant pre { background:#0d1117; padding:10px; border-radius:8px; overflow-x:auto; margin:8px 0; }
+  .msg.assistant pre code { background:none; padding:0; }
+  #saisie { padding:16px 20px; border-top:1px solid #232836; display:flex; gap:10px; }
+  #input { flex:1; background:#161922; border:1px solid #2a3140; border-radius:10px; padding:12px 14px; color:#e6e9ef; font-size:14px; resize:none; outline:none; }
+  #input:focus { border-color:#10b981; }
+  #btnEnvoyer { background:#10b981; border:none; border-radius:10px; color:#04231a; font-weight:700; padding:0 20px; cursor:pointer; font-size:14px; }
+  #btnEnvoyer:disabled { opacity:.5; cursor:wait; }
+  #etat { padding:6px 20px; font-size:12px; color:#8a93a6; }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <header>
+    <h1>🛡 CyberAI</h1>
+    <button id="btnNouveau">＋ Nouvelle conversation</button>
+  </header>
+  <div id="liste"><div class="vide">Aucune conversation</div></div>
+</div>
+
+<div id="main">
+  <div id="header">💬 <b id="titreConv">Nouvelle conversation</b></div>
+  <div id="messages"><div class="vide">Écris ton premier message pour démarrer.</div></div>
+  <div id="etat"></div>
+  <div id="saisie">
+    <textarea id="input" rows="2" placeholder="Message à CyberAI... (Entrée pour envoyer, Maj+Entrée pour sauter une ligne)"></textarea>
+    <button id="btnEnvoyer">➤</button>
+  </div>
+</div>
+
 <script>
-const T='{CONFIG.api_token}',U=window.location.origin;
-async function sendChat(){{const r=document.getElementById('chatResult');r.classList.remove('hidden');r.textContent='⏳...';
-const d=await(await fetch(U+'/chat',{{method:'POST',headers:{{'Authorization':'Bearer '+T,'Content-Type':'application/json'}},body:JSON.stringify({{question:document.getElementById('chatInput').value}})}})).json();
-r.textContent=d.response||'Erreur'}}
-async function sendImage(){{const f=document.getElementById('imageInput').files[0];if(!f)return alert('Sélectionne une image');
-const fd=new FormData();fd.append('file',f);const r=document.getElementById('imageResult');r.classList.remove('hidden');r.textContent='⏳...';
-const d=await(await fetch(U+'/analyze_image',{{method:'POST',headers:{{'Authorization':'Bearer '+T}},body:fd}})).json();
-r.textContent='📄 OCR: '+(d.ocr_text||'rien')+'\\n\\n🤖 Analyse: '+(d.analysis||'')}}
-let mr,chunks=[],rec=false;
-async function toggleRecording(){{const b=document.getElementById('recordBtn');
-if(!rec){{chunks=[];const s=await navigator.mediaDevices.getUserMedia({{audio:true}});mr=new MediaRecorder(s);
-mr.ondataavailable=e=>chunks.push(e.data);mr.onstop=async()=>{{const blob=new Blob(chunks,{{type:'audio/webm'}});
-const fd=new FormData();fd.append('audio',blob);const r=document.getElementById('audioResult');r.classList.remove('hidden');r.textContent='⏳...';
-const d=await(await fetch(U+'/chat_with_audio',{{method:'POST',headers:{{'Authorization':'Bearer '+T}},body:fd}})).json();
-r.textContent='📝 Toi: '+d.transcription+'\\n\\n🤖 CyberAI: '+d.text_response;
-if(d.audio_response_base64){{const p=document.getElementById('audioPlayer');p.src='data:audio/mpeg;base64,'+d.audio_response_base64;p.classList.remove('hidden');p.play()}}}};
-mr.start();rec=true;b.textContent='⏹️ Arrêter';b.classList.add('recording')}}
-else{{mr.stop();rec=false;b.textContent='🎤 Enregistrer';b.classList.remove('recording')}}}}
-</script></body></html>""")
+let currentId = null;
+
+// ---------- utilitaires ----------
+async function api(url, options) {
+  const r = await fetch(url, {
+    headers: { 'Content-Type': 'application/json' },
+    ...options
+  });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+function tempsRelatif(ts) {
+  const s = Math.floor(Date.now() / 1000 - ts);
+  if (s < 60) return "à l'instant";
+  if (s < 3600) return Math.floor(s / 60) + ' min';
+  if (s < 86400) return Math.floor(s / 3600) + ' h';
+  return Math.floor(s / 86400) + ' j';
+}
+
+function echapper(texte) {
+  const d = document.createElement('div');
+  d.textContent = texte;           // neutre : pas d'exécution HTML
+  return d.innerHTML;
+}
+
+function rendreMarkdown(texte) {
+  // mini-rendu markdown (code, gras) — reste simple et sûr
+  let t = echapper(texte);
+  t = t.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
+  t = t.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  t = t.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+  return t;
+}
+
+// ---------- interface ----------
+function addMessage(role, contenu) {
+  const zone = document.getElementById('messages');
+  const vide = zone.querySelector('.vide');
+  if (vide) vide.remove();
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  div.innerHTML = rendreMarkdown(contenu);
+  zone.appendChild(div);
+  zone.scrollTop = zone.scrollHeight;
+}
+
+function viderMessages() {
+  document.getElementById('messages').innerHTML = '<div class="vide">Écris ton premier message pour démarrer.</div>';
+}
+
+function setTitre(t) {
+  document.getElementById('titreConv').textContent = t || 'Nouvelle conversation';
+}
+
+async function chargerConversations() {
+  try {
+    const liste = await api('/api/conversations');
+    const zone = document.getElementById('liste');
+    zone.innerHTML = '';
+    if (!liste.length) {
+      zone.innerHTML = '<div class="vide">Aucune conversation</div>';
+      return;
+    }
+    liste.forEach(c => {
+      const d = document.createElement('div');
+      d.className = 'conv' + (c.id === currentId ? ' active' : '');
+      d.innerHTML =
+        '<span class="titre">' + echapper(c.titre) + '</span>' +
+        '<span class="meta">' + tempsRelatif(c.updated_at) + '</span>' +
+        '<button class="del" title="Supprimer">🗑</button>';
+      d.onclick = () => ouvrirConversation(c.id);
+      d.querySelector('.del').onclick = (e) => supprimerConversation(c.id, e);
+      zone.appendChild(d);
+    });
+  } catch (e) {
+    console.error('Erreur chargement conversations :', e);
+  }
+}
+
+async function ouvrirConversation(id) {
+  try {
+    const conv = await api('/api/conversations/' + id);
+    currentId = id;
+    viderMessages();
+    conv.messages.forEach(m => addMessage(m.role, m.content));
+    setTitre(conv.titre);
+    chargerConversations();
+  } catch (e) { console.error(e); }
+}
+
+async function supprimerConversation(id, ev) {
+  ev.stopPropagation();
+  if (!confirm('Supprimer définitivement cette conversation ?')) return;
+  await api('/api/conversations/' + id, { method: 'DELETE' });
+  if (currentId === id) nouveauChat();
+  else chargerConversations();
+}
+
+function nouveauChat() {
+  currentId = null;
+  viderMessages();
+  setTitre('Nouvelle conversation');
+  chargerConversations();
+  document.getElementById('input').focus();
+}
+
+// ---------- envoi ----------
+async function envoyer() {
+  const input = document.getElementById('input');
+  const btn = document.getElementById('btnEnvoyer');
+  const msg = input.value.trim();
+  if (!msg || btn.disabled) return;
+
+  btn.disabled = true;
+  document.getElementById('etat').textContent = '⏳ Réflexion en cours...';
+  addMessage('user', msg);
+  input.value = '';
+
+  try {
+    if (!currentId) {
+      const r = await api('/api/conversations', { method: 'POST' });
+      currentId = r.id;
+    }
+    const r = await api('/chat', {
+      method: 'POST',
+      body: JSON.stringify({ message: msg, conversation_id: currentId })
+    });
+    addMessage('assistant', r.reponse);
+    document.getElementById('etat').textContent = '';
+    chargerConversations();
+  } catch (e) {
+    addMessage('assistant', '⚠️ Erreur : ' + e.message);
+    document.getElementById('etat').textContent = '';
+  } finally {
+    btn.disabled = false;
+    input.focus();
+  }
+}
+
+// ---------- événements ----------
+document.getElementById('btnEnvoyer').onclick = envoyer;
+document.getElementById('btnNouveau').onclick = nouveauChat;
+document.getElementById('input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); envoyer(); }
+});
+
+// ---------- démarrage ----------
+chargerConversations();
+document.getElementById('input').focus();
+</script>
+</body>
+</html>""")
 
 if __name__ == "__main__":
     import uvicorn

